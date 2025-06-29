@@ -7,7 +7,7 @@ public class PluginLauncher
 {
 	public static void main(String[] args) throws Exception
 	{
-		ExternalPluginManager.loadBuiltin(KPRuneLiteHAPlugin.class);
+		ExternalPluginManager.loadBuiltin(HomeAssistantPlugin.class);
 		RuneLite.main(args);
 	}
 }
