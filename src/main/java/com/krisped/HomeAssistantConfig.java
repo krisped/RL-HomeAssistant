@@ -4,16 +4,17 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
+import net.runelite.client.config.Range;
 
 @ConfigGroup("kp_home_assistant")
 public interface HomeAssistantConfig extends Config
 {
-	/* ─────────── Home-Assistant API ─────────── */
+	/* ─────────────────────────── Home-Assistant API ─────────────────────────── */
 	@ConfigSection(
-			name        = "Home Assistant Config",
-			description = "Enter your Home Assistant URL and token",
-			position    = 0,
-			closedByDefault = true
+			name             = "Home Assistant Config",
+			description      = "Enter your Home Assistant URL and token",
+			position         = 0,
+			closedByDefault  = true
 	)
 	String sectionApi = "api";
 
@@ -35,12 +36,12 @@ public interface HomeAssistantConfig extends Config
 	)
 	default String haToken() { return ""; }
 
-	/* ─────────── Hvilke sensorer som er aktive ─────────── */
+	/* ───────────────────────────── Status-toggles ───────────────────────────── */
 	@ConfigSection(
-			name        = "Status",
-			description = "Which statuses to send to Home Assistant",
-			position    = 10,
-			closedByDefault = false
+			name             = "Status",
+			description      = "Which statuses to send to Home Assistant",
+			position         = 10,
+			closedByDefault  = false
 	)
 	String sectionStatus = "status";
 
@@ -115,4 +116,24 @@ public interface HomeAssistantConfig extends Config
 			section     = sectionStatus
 	)
 	default boolean showCurrentSkill() { return false; }
+
+	@ConfigItem(
+			keyName     = "showIdleStatus",
+			name        = "Show Idle Status",
+			description = "Enable sending Idle/Active + idle seconds",
+			position    = 19,
+			section     = sectionStatus
+	)
+	default boolean showIdleStatus() { return false; }
+
+	/* ───────────────────────────── Idle-slider ─────────────────────────────── */
+	@ConfigItem(
+			keyName     = "idleThresholdSeconds",
+			name        = "Idle delay (s)",
+			description = "Seconds without animation before you are considered Idle",
+			position    = 20,
+			section     = sectionStatus
+	)
+	@Range(min = 1, max = 60)          // slider 1-60
+	default int idleThresholdSeconds() { return 5; }
 }
