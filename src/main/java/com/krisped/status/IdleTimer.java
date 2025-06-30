@@ -8,14 +8,16 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.Player;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameTick;
 import net.runelite.client.eventbus.Subscribe;
 import okhttp3.*;
 
 /**
- * Sender bare én webhook når status skifter:
- *   { "state":"Idle" }      når terskelen passeres
- *   { "state":"Not Idle"}   når spiller blir aktiv igjen
+ * Sender kun én webhook pr. overgang:
+ *   { "state":"Idle" }     når sliderterskel passeres
+ *   { "state":"Not Idle"}  når spilleren blir aktiv igjen
  */
 @Slf4j
 public class IdleTimer
@@ -29,10 +31,13 @@ public class IdleTimer
     private final Supplier<String> baseUrl;
     private final Supplier<String> userId;
 
+    /* interne felter */
     private boolean enabled;
     private boolean idle;
-    private Instant  idleStart;
+    private Instant idleStart;
+    private WorldPoint lastPos;
 
+    /* ───────── ctor ───────── */
     @Inject
     public IdleTimer(
             Client client,
@@ -55,6 +60,7 @@ public class IdleTimer
     {
         idle = false;
         idleStart = null;
+        lastPos = null;
         if (online && enabled)
             sendState("Not Idle");
     }
@@ -77,24 +83,32 @@ public class IdleTimer
     {
         if (!enabled || client.getGameState() != GameState.LOGGED_IN) return;
 
-        int threshold = cfg.idleThresholdSeconds();
+        Player p = client.getLocalPlayer();
+        if (p == null) return;
 
-        boolean animPlaying = client.getLocalPlayer().getAnimation() != -1;
+        /* aktiv dersom animasjon eller posisjon endres */
+        boolean animActive = p.getAnimation() != -1;
+        WorldPoint pos     = p.getWorldLocation();
+        boolean moved      = lastPos != null && !lastPos.equals(pos);
+        lastPos = pos;
+
+        boolean active = animActive || moved;
+        int threshold  = cfg.idleThresholdSeconds();
 
         if (idle)
         {
-            if (animPlaying)               // ble aktiv igjen
+            if (active)
             {
                 idle = false;
                 idleStart = null;
                 sendState("Not Idle");
             }
         }
-        else
+        else     /* ikke idle akkurat nå */
         {
-            if (animPlaying)
+            if (active)
             {
-                idleStart = null;          // fortsatt aktiv
+                idleStart = null;           // fortsatt aktiv
             }
             else
             {
@@ -102,7 +116,7 @@ public class IdleTimer
                     idleStart = Instant.now();
 
                 long diff = Instant.now().getEpochSecond() - idleStart.getEpochSecond();
-                if (diff >= threshold)     // terskel nådd
+                if (diff >= threshold)
                 {
                     idle = true;
                     sendState("Idle");
@@ -116,16 +130,18 @@ public class IdleTimer
     private void sendState(String state)
     {
         if (!enabled) return;
-        String url  = String.format("%s/api/events/kp_runelite_idle_%s", baseUrl.get(), userId.get());
-        String body = String.format("{\"state\":\"%s\"}", state);
-        post(url, body);
+        post(
+                String.format("%s/api/events/kp_runelite_idle_%s", baseUrl.get(), userId.get()),
+                String.format("{\"state\":\"%s\"}", state)
+        );
     }
 
     private void sendToggle(boolean on)
     {
-        String url  = String.format("%s/api/events/kp_runelite_idle_%s", baseUrl.get(), userId.get());
-        String body = String.format("{\"enabled\":%b}", on);
-        post(url, body);
+        post(
+                String.format("%s/api/events/kp_runelite_idle_%s", baseUrl.get(), userId.get()),
+                String.format("{\"enabled\":%b}", on)
+        );
     }
 
     private void post(String url, String json)
