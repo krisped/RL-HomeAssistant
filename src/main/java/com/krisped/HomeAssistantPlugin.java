@@ -2,6 +2,7 @@ package com.krisped;
 
 import com.google.inject.Provides;
 import com.krisped.status.*;
+import com.sun.net.httpserver.HttpServer;                         // ← NY
 import java.io.IOException;
 import java.util.concurrent.*;
 import java.util.regex.Pattern;
@@ -42,6 +43,8 @@ public class HomeAssistantPlugin extends Plugin
 	/* ───────── fields ───────── */
 	private final OkHttpClient httpClient = new OkHttpClient();
 	private ScheduledFuture<?> heartbeatTask;
+
+	private HttpServer keyServer;                                   // ← NY
 
 	private boolean lastShowHealth;
 	private boolean lastShowPrayer;
@@ -112,6 +115,17 @@ public class HomeAssistantPlugin extends Plugin
 		}
 
 		scheduleHeartbeat();
+
+		/* ───── start Keyboard HTTP-server ───── */
+		try
+		{
+			keyServer = Keyboard.start(config.keyboardBindHost(), config.keyboardPort());
+			log.info("Keyboard HTTP-server startet på {}:{}", config.keyboardBindHost(), config.keyboardPort());
+		}
+		catch (IOException ex)
+		{
+			log.error("Kunne ikke starte Keyboard-server", ex);
+		}
 	}
 
 	@Override
@@ -125,6 +139,13 @@ public class HomeAssistantPlugin extends Plugin
 		eventBus.unregister(specialService);
 		eventBus.unregister(currentSkillService);
 		eventBus.unregister(idleTimer);
+
+		/* ───── stopp Keyboard-server ───── */
+		if (keyServer != null)
+		{
+			keyServer.stop(0);
+			keyServer = null;
+		}
 
 		super.shutDown();
 	}

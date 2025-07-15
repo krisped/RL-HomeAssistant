@@ -1,11 +1,10 @@
 package com.krisped;
 
-import net.runelite.client.config.Config;
-import net.runelite.client.config.ConfigGroup;
-import net.runelite.client.config.ConfigItem;
-import net.runelite.client.config.ConfigSection;
-import net.runelite.client.config.Range;
+import net.runelite.client.config.*;
 
+/**
+ * KP Home Assistant Plugin Configuration
+ */
 @ConfigGroup("kp_home_assistant")
 public interface HomeAssistantConfig extends Config
 {
@@ -35,6 +34,7 @@ public interface HomeAssistantConfig extends Config
 			section     = sectionApi
 	)
 	default String haToken() { return ""; }
+
 
 	/* ───────────────────────────── Status-toggles ───────────────────────────── */
 	@ConfigSection(
@@ -126,7 +126,6 @@ public interface HomeAssistantConfig extends Config
 	)
 	default boolean showIdleStatus() { return false; }
 
-	/* ───────────────────────────── Idle-slider ─────────────────────────────── */
 	@ConfigItem(
 			keyName     = "idleThresholdSeconds",
 			name        = "Idle delay (s)",
@@ -134,6 +133,41 @@ public interface HomeAssistantConfig extends Config
 			position    = 20,
 			section     = sectionStatus
 	)
-	@Range(min = 1, max = 60)          // slider 1-60
+	@Range(min = 1, max = 60)
 	default int idleThresholdSeconds() { return 5; }
+
+
+	/* ───────────────────────────── Keybinding ─────────────────────────────── */
+	@ConfigSection(
+			name             = "Keyboard Server",
+			description      = "Settings for keyboard HTTP listener",
+			position         = 30,
+			closedByDefault  = true
+	)
+	String sectionKeyboard = "keyboard";
+
+	@ConfigItem(
+			keyName     = "keyboardBindHost",
+			name        = "Bind address",
+			description = "Adresse å binde keyboard-serveren på (0.0.0.0 for alle nettverk)",
+			position    = 31,
+			section     = sectionKeyboard
+	)
+	default String keyboardBindHost()
+	{
+		return "0.0.0.0";
+	}
+
+	@ConfigItem(
+			keyName     = "keyboardPort",
+			name        = "Port",
+			description = "Port for keyboard HTTP-serveren",
+			position    = 32,
+			section     = sectionKeyboard
+	)
+	@Range(min = 1024, max = 65535)
+	default int keyboardPort()
+	{
+		return 8124;
+	}
 }
