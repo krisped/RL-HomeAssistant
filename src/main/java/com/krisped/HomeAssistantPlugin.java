@@ -2,8 +2,9 @@ package com.krisped;
 
 import com.google.inject.Provides;
 import com.krisped.status.*;
-import com.sun.net.httpserver.HttpServer;                         // ← NY
+import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.util.concurrent.*;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
@@ -16,16 +17,14 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.overlay.OverlayManager;
 import okhttp3.*;
 
 /**
- * KP RuneLite → Home Assistant bridge.
+ * KP RuneLite ↔ Home Assistant bridge inklusive «HA Button Check» via HA‑WS.
  */
 @Slf4j
-@PluginDescriptor(
-		name = "KP Home Assistant",
-		enabledByDefault = true
-)
+@PluginDescriptor(name = "KP Home Assistant", enabledByDefault = true)
 public class HomeAssistantPlugin extends Plugin
 {
 	/* ───────── constants ───────── */
@@ -35,17 +34,22 @@ public class HomeAssistantPlugin extends Plugin
 			Pattern.compile("[^a-z0-9]");
 
 	/* ───────── injected ───────── */
-	@Inject private Client client;
-	@Inject private HomeAssistantConfig config;
-	@Inject private ScheduledExecutorService executor;
-	@Inject private EventBus eventBus;
+	@Inject private Client                    client;
+	@Inject private HomeAssistantConfig       config;
+	@Inject private ScheduledExecutorService  executor;
+	@Inject private EventBus                  eventBus;
+	@Inject private OverlayManager            overlayManager;
 
 	/* ───────── fields ───────── */
 	private final OkHttpClient httpClient = new OkHttpClient();
 	private ScheduledFuture<?> heartbeatTask;
 
-	private HttpServer keyServer;                                   // ← NY
+	private HttpServer      keyServer;   // eksisterende keyboard‑HTTP
+	private HaWsClient      haWsClient;  // ny WS‑klient
+	private HAButtonOverlay overlay;     // overlay for ON/OFF
+	private volatile boolean haButtonOn; // gjeldende state
 
+	/* sensor‐toggles */
 	private boolean lastShowHealth;
 	private boolean lastShowPrayer;
 	private boolean lastShowEnergy;
@@ -54,11 +58,16 @@ public class HomeAssistantPlugin extends Plugin
 	private boolean lastShowCurrentSkill;
 	private boolean lastShowIdleStatus;
 
+	/* helper‑services */
 	private CurrentOpponent     opponentService;
 	private CurrentLocation     locationService;
 	private SpecialAttackStatus specialService;
 	private CurrentSkill        currentSkillService;
 	private IdleTimer           idleTimer;
+
+	/* ───────── API for overlay ───────── */
+	public void setHaButtonState(boolean on) { haButtonOn = on; }
+	public boolean isHaButtonOn()            { return haButtonOn; }
 
 	/* ───────── config provider ───────── */
 	@Provides
@@ -73,7 +82,7 @@ public class HomeAssistantPlugin extends Plugin
 	{
 		super.startUp();
 
-		/* read toggles */
+		/* les toggles */
 		lastShowHealth        = config.showHealth();
 		lastShowPrayer        = config.showPrayer();
 		lastShowEnergy        = config.showEnergy();
@@ -82,14 +91,13 @@ public class HomeAssistantPlugin extends Plugin
 		lastShowCurrentSkill  = config.showCurrentSkill();
 		lastShowIdleStatus    = config.showIdleStatus();
 
-		/* init helper services */
-		opponentService    = new CurrentOpponent(client, config, httpClient, this::baseUrl, this::getUserId);
-		locationService    = new CurrentLocation(client, config, httpClient, this::baseUrl, this::getUserId);
-		specialService     = new SpecialAttackStatus(client, config, httpClient, this::baseUrl, this::getUserId);
-		currentSkillService= new CurrentSkill(client, config, httpClient, this::baseUrl, this::getUserId);
-		idleTimer          = new IdleTimer(client, config, httpClient, this::baseUrl, this::getUserId);
+		/* init helper‑klasser */
+		opponentService     = new CurrentOpponent(client, config, httpClient, this::baseUrl, this::getUserId);
+		locationService     = new CurrentLocation(client, config, httpClient, this::baseUrl, this::getUserId);
+		specialService      = new SpecialAttackStatus(client, config, httpClient, this::baseUrl, this::getUserId);
+		currentSkillService = new CurrentSkill(client, config, httpClient, this::baseUrl, this::getUserId);
+		idleTimer           = new IdleTimer(client, config, httpClient, this::baseUrl, this::getUserId);
 
-		/* register for events */
 		eventBus.register(opponentService);
 		eventBus.register(locationService);
 		eventBus.register(specialService);
@@ -97,13 +105,13 @@ public class HomeAssistantPlugin extends Plugin
 		eventBus.register(idleTimer);
 
 		boolean online = isOnline();
-		opponentService   .init(online);
-		locationService   .init(online);
-		specialService    .init(online);
+		opponentService    .init(online);
+		locationService    .init(online);
+		specialService     .init(online);
 		currentSkillService.init(online);
-		idleTimer         .init(online);
+		idleTimer          .init(online);
 
-		/* initial push */
+		/* init push */
 		if (online)
 		{
 			sendStatus("Online");
@@ -116,16 +124,24 @@ public class HomeAssistantPlugin extends Plugin
 
 		scheduleHeartbeat();
 
-		/* ───── start Keyboard HTTP-server ───── */
+		/* start keyboard HTTP‑server (eksisterende) */
 		try
 		{
 			keyServer = Keyboard.start(config.keyboardBindHost(), config.keyboardPort());
-			log.info("Keyboard HTTP-server startet på {}:{}", config.keyboardBindHost(), config.keyboardPort());
+			log.info("Keyboard HTTP‑server startet på {}:{}", config.keyboardBindHost(), config.keyboardPort());
 		}
 		catch (IOException ex)
 		{
-			log.error("Kunne ikke starte Keyboard-server", ex);
+			log.error("Kunne ikke starte Keyboard‑server", ex);
 		}
+
+		/* ----  NYE DELER  ---- */
+		String wsUrl = config.haUrl().replaceFirst("^http", "ws") + "/api/websocket";
+		haWsClient = new HaWsClient(wsUrl, config.haToken(), this);
+		haWsClient.connect();
+
+		overlay = new HAButtonOverlay(this::isHaButtonOn);
+		overlayManager.add(overlay);
 	}
 
 	@Override
@@ -140,17 +156,13 @@ public class HomeAssistantPlugin extends Plugin
 		eventBus.unregister(currentSkillService);
 		eventBus.unregister(idleTimer);
 
-		/* ───── stopp Keyboard-server ───── */
-		if (keyServer != null)
-		{
-			keyServer.stop(0);
-			keyServer = null;
-		}
+		if (keyServer != null) keyServer.stop(0);
+		if (overlay   != null) overlayManager.remove(overlay);
 
 		super.shutDown();
 	}
 
-	/* ───────── config changes ───────── */
+	/* ───────── config changes – uendret logikk ───────── */
 	@Subscribe
 	public void onConfigChanged(ConfigChanged ev)
 	{
@@ -167,7 +179,6 @@ public class HomeAssistantPlugin extends Plugin
 					if (lastShowHealth) sendCurrentHealth();
 				}
 				break;
-
 			case "showPrayer":
 				lastShowPrayer = config.showPrayer();
 				if (online) {
@@ -175,7 +186,6 @@ public class HomeAssistantPlugin extends Plugin
 					if (lastShowPrayer) sendCurrentPrayer();
 				}
 				break;
-
 			case "showEnergy":
 				lastShowEnergy = config.showEnergy();
 				if (online) {
@@ -183,7 +193,6 @@ public class HomeAssistantPlugin extends Plugin
 					if (lastShowEnergy) sendCurrentEnergy();
 				}
 				break;
-
 			case "showCurrentWorld":
 				lastShowCurrentWorld = config.showCurrentWorld();
 				if (online) {
@@ -191,35 +200,29 @@ public class HomeAssistantPlugin extends Plugin
 					if (lastShowCurrentWorld) sendCurrentWorld();
 				}
 				break;
-
 			case "showCurrentOpponent":
 				opponentService.onConfigChanged(ev, online);
 				break;
-
 			case "showCurrentLocation":
 				locationService.onConfigChanged(ev, online);
 				break;
-
 			case "showSpecialAttack":
 				lastShowSpecialAttack = config.showSpecialAttack();
 				specialService.onConfigChanged(ev, online);
 				break;
-
 			case "showCurrentSkill":
 				lastShowCurrentSkill = config.showCurrentSkill();
 				currentSkillService.onConfigChanged(ev, online);
 				break;
-
 			case "showIdleStatus":
 				lastShowIdleStatus = config.showIdleStatus();
 				idleTimer.onConfigChanged(online);
 				break;
-
-			default: /* ignore */
+			default:
 		}
 	}
 
-	/* ───────── RuneLite events ───────── */
+	/* ───────── RuneLite events – uendret logikk ───────── */
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged evt)
 	{
@@ -255,8 +258,8 @@ public class HomeAssistantPlugin extends Plugin
 			if (lastShowSpecialAttack) sendCurrentSpecial();
 		}
 
-		opponentService .onPlayerSpawned(ev);
-		locationService .onPlayerSpawned(ev);
+		opponentService.onPlayerSpawned(ev);
+		locationService.onPlayerSpawned(ev);
 	}
 
 	@Subscribe
@@ -346,89 +349,62 @@ public class HomeAssistantPlugin extends Plugin
 		});
 	}
 
-	/* ───────── SEND-metoder ───────── */
+	/* ───────── SEND‑metoder (identisk med original) ───────── */
+
+	private void postF(String topic, String fmt, Object... args)
+	{
+		post(String.format("%s/api/events/kp_runelite_%s_%s",
+						baseUrl(), topic, getUserId()),
+				String.format(fmt, args));
+	}
 
 	private void sendStatus(String status)
-	{
-		String id = getUserId();
-		post(String.format("%s/api/events/kp_runelite_update_%s", baseUrl(), id),
-				String.format("{\"status\":\"%s\"}", status));
-	}
+	{ postF("update", "{\"status\":\"%s\"}", status); }
 
 	private void sendCurrentHealth()
 	{
-		String id = getUserId();
 		int cur = client.getBoostedSkillLevel(Skill.HITPOINTS);
 		int max = client.getRealSkillLevel(Skill.HITPOINTS);
-		post(String.format("%s/api/events/kp_runelite_health_%s", baseUrl(), id),
-				String.format("{\"current\":%d,\"max\":%d}", cur, max));
+		postF("health", "{\"current\":%d,\"max\":%d}", cur, max);
 	}
 
 	private void sendHealthToggle(boolean on)
-	{
-		String id = getUserId();
-		post(String.format("%s/api/events/kp_runelite_health_%s", baseUrl(), id),
-				String.format("{\"enabled\":%b}", on));
-	}
+	{ postF("health", "{\"enabled\":%b}", on); }
 
 	private void sendCurrentPrayer()
 	{
-		String id = getUserId();
 		int cur = client.getBoostedSkillLevel(Skill.PRAYER);
 		int max = client.getRealSkillLevel(Skill.PRAYER);
-		post(String.format("%s/api/events/kp_runelite_prayer_%s", baseUrl(), id),
-				String.format("{\"current\":%d,\"max\":%d}", cur, max));
+		postF("prayer", "{\"current\":%d,\"max\":%d}", cur, max);
 	}
 
 	private void sendPrayerToggle(boolean on)
-	{
-		String id = getUserId();
-		post(String.format("%s/api/events/kp_runelite_prayer_%s", baseUrl(), id),
-				String.format("{\"enabled\":%b}", on));
-	}
+	{ postF("prayer", "{\"enabled\":%b}", on); }
 
 	private void sendCurrentEnergy()
 	{
-		String id = getUserId();
 		int pct = client.getEnergy() / 100;
-		post(String.format("%s/api/events/kp_runelite_energy_%s", baseUrl(), id),
-				String.format("{\"current\":%d,\"max\":100}", pct));
+		postF("energy", "{\"current\":%d,\"max\":100}", pct);
 	}
 
 	private void sendEnergyToggle(boolean on)
-	{
-		String id = getUserId();
-		post(String.format("%s/api/events/kp_runelite_energy_%s", baseUrl(), id),
-				String.format("{\"enabled\":%b}", on));
-	}
+	{ postF("energy", "{\"enabled\":%b}", on); }
 
 	private void sendCurrentWorld()
 	{
-		String id = getUserId();
 		int world = client.getWorld();
-		post(String.format("%s/api/events/kp_runelite_world_%s", baseUrl(), id),
-				String.format("{\"world\":%d}", world));
+		postF("world", "{\"world\":%d}", world);
 	}
 
 	private void sendWorldToggle(boolean on)
-	{
-		String id = getUserId();
-		post(String.format("%s/api/events/kp_runelite_world_%s", baseUrl(), id),
-				String.format("{\"enabled\":%b}", on));
-	}
+	{ postF("world", "{\"enabled\":%b}", on); }
 
 	private void sendCurrentSpecial()
 	{
-		String id = getUserId();
 		int pct = client.getVarpValue(VarPlayer.SPECIAL_ATTACK_PERCENT) / 10;
-		post(String.format("%s/api/events/kp_runelite_special_%s", baseUrl(), id),
-				String.format("{\"current\":%d,\"max\":100}", pct));
+		postF("special", "{\"current\":%d,\"max\":100}", pct);
 	}
 
 	private void sendSpecialToggle(boolean on)
-	{
-		String id = getUserId();
-		post(String.format("%s/api/events/kp_runelite_special_%s", baseUrl(), id),
-				String.format("{\"enabled\":%b}", on));
-	}
+	{ postF("special", "{\"enabled\":%b}", on); }
 }
